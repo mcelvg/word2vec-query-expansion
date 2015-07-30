@@ -15,12 +15,15 @@
  */
 package com.radialpoint.word2vec;
 
-import java.io.ByteArrayInputStream;
-import java.io.DataInputStream;
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.Charset;
+import java.util.Arrays;
 
 /**
  * This program takes vectors are produced by the C program word2vec and transforms them into a Java binary file to be
@@ -32,83 +35,104 @@ public class ConvertVectors {
      * @param args
      *            the input C vectors file, output Java vectors file
      */
-    public static void main(String[] args) throws VectorsException, IOException {
+    public static void main(String[] args) throws VectorsException, IOException
+    {
+        File outputFile = new File(args[1]);
+
+        Vectors instance = loadGoogleBinary(args[0]);
+        
+        FileOutputStream fos = new FileOutputStream(outputFile);
+        instance.writeTo(fos);
+    }
+    
+    public static Vectors loadGoogleBinary(String pathToFile) throws VectorsException, IOException
+    {
         float[][] vectors;
         String[] vocabVects;
         int words;
         int size;
 
-        File vectorFile = new File(args[0]);
-        File outputFile = new File(args[1]);
-
-        double len;
+        File vectorFile = new File(pathToFile);
 
         if (!vectorFile.exists())
             throw new VectorsException("Vectors file not found");
 
         FileInputStream fis = new FileInputStream(vectorFile);
 
+        BufferedInputStream in = new BufferedInputStream(fis);
+
         StringBuilder sb = new StringBuilder();
-        char ch = (char) fis.read();
+        char ch = (char) in.read();
         while (ch != '\n') {
             sb.append(ch);
-            ch = (char) fis.read();
+            ch = (char) in.read();
         }
 
         String line = sb.toString();
         String[] parts = line.split("\\s+");
         words = (int) Long.parseLong(parts[0]);
         size = (int) Long.parseLong(parts[1]);
-        vectors = new float[words][];
+        vectors = new float[words][size];
         vocabVects = new String[words];
 
         System.out.println("" + words + " words with size " + size + " per vector.");
 
-        byte[] orig = new byte[4];
-        byte[] buf = new byte[4];
+        byte[] bytes = new byte[4 * size];
+        ByteBuffer buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+        
         for (int w = 0; w < words; w++) {
             if (w % (words / 10) == 0) {
                 System.out.println("Read " + w + " words");
             }
+            vocabVects[w] = readNextWord(in, Charset.defaultCharset());
 
-            sb.setLength(0);
-            ch = (char) fis.read();
-            while (!Character.isWhitespace(ch) && ch >= 0 && ch <= 256) {
-                sb.append((char) ch);
-                ch = (char) fis.read();
+            in.read(bytes);
+            double len = 0;
+            for (int j = 0; j < size; j++)
+            {
+                vectors[w][j] = buf.getFloat(j * 4);
+                len += vectors[w][j] * vectors[w][j];
             }
-            ch = (char) fis.read();
-            String st = sb.toString();
-
-            vocabVects[w] = st;
-            float[] m = new float[size];
-            for (int i = 0; i < size; i++) {
-                // read a little endian floating point number and interpret it as a big endian one, see
-                // http://stackoverflow.com/questions/2782725/converting-float-values-from-big-endian-to-little-endian/2782742#2782742
-                // NB: this code assumes amd64 architecture
-                for (int j = 0; j < 4; j++)
-                    orig[j] = (byte) fis.read();
-                buf[2] = orig[0];
-                buf[1] = orig[1];
-                buf[0] = orig[2];
-                buf[3] = orig[3];
-                // this code can be made more efficient by reusing the ByteArrayInputStream
-                DataInputStream dis = new DataInputStream(new ByteArrayInputStream(buf));
-                m[i] = dis.readFloat();
-                dis.close();
-            }
-            len = 0;
-            for (int i = 0; i < size; i++)
-                len += m[i] * m[i];
+            // convert to unit vector
             len = (float) Math.sqrt(len);
-            for (int i = 0; i < size; i++)
-                m[i] /= len;
-            vectors[w] = m;
+            for (int k = 0; k < size; k++)
+            {
+                vectors[w][k] /= len;
+            }
         }
         fis.close();
-
-        FileOutputStream fos = new FileOutputStream(outputFile);
-        Vectors instance = new Vectors(vectors, vocabVects);
-        instance.writeTo(fos);
+        in.close();
+        return new Vectors(vectors, vocabVects);
     }
+    
+    private static String readNextWord(BufferedInputStream in, Charset cs) throws VectorsException
+    {
+        // larger than necessary, word2vec.c limits max word length to 50
+        byte[] buf = new byte[500];
+        try
+        {
+            int p = 0;
+            char ch = (char) in.read();
+            // GoogleNews-vectors-negative300.bin dosen't include '\n' chars
+            // between vectors - this check allows you to load binary files
+            // created with either version of Mikolov's word2vec code
+            while (Character.isWhitespace(ch))
+            {
+                ch = (char) in.read();
+            }
+            while (!Character.isWhitespace(ch))
+            {
+                buf[p] = (byte) ch;
+                ch = (char) in.read();
+                p++;
+            }
+            buf = Arrays.copyOf(buf, p);
+        }
+        catch (IOException e)
+        {
+            throw new VectorsException("Failed to read next word");
+        }
+        return new String(buf, cs);
+    }
+
 }
